@@ -197,8 +197,8 @@ md"""
 ```math
 \begin{aligned}
 	\min_y\quad & \sum_{e\in E} c_e y_e + \dfrac{1}{|S|}\sum_{s\in S} d_{es} z_{es}\\
-	\text{s.t.}\quad & \sum_{e\in E} (y_e + \sum_{s\in S} z_{es}) = |V|-1\\
-	& \sum_{e\in E(Y)} (y_e +\sum_{s\in S} z_{es}) \leq |Y| - 1,\quad &\forall \emptyset\subsetneq Y\subsetneq V\\
+	\text{s.t.}\quad & \sum_{e\in E} (y_e + z_{es}) = |V| - 1 & \forall s\in S\\
+	& \sum_{e\in E(Y)} (y_e + z_{es}) \leq |Y| - 1,\quad &\forall \emptyset\subsetneq Y\subsetneq V,\forall s\in S\\
 	& y_e\in \{0, 1\},\quad &\forall e\in E\\
 	& z_{es}\in \{0, 1\},\quad &\forall e\in E,\,\forall s\in S
 \end{aligned}
@@ -206,7 +206,7 @@ md"""
 """
 
 # ╔═╡ bf369999-41c1-481f-9f17-ec7d5dd08445
-md"We'll use the folling `Instance` data structure:"
+md"We'll use the following `Instance` data structure:"
 
 # ╔═╡ 7d9a2b6e-e8a9-4cf0-af4b-e45603d45008
 md"""### Creating instances"""
@@ -239,12 +239,6 @@ S = 50
 
 # ╔═╡ 8bc212ec-5a5d-401d-97d0-b2e0eb2b3b6f
 instance = random_instance(; n, m, nb_scenarios=S, seed=0)
-
-# ╔═╡ cb35c856-6938-41d5-854d-b16af6025184
-begin
-	
-	
-end;
 
 # ╔═╡ 76cbf0da-7437-464a-ba1b-e093cabd3b83
 md"""### Visualization tools"""
@@ -347,9 +341,10 @@ md"""The separation problem can be formulated as the following MILP:
 
 ```math
 \begin{array}{rll}
-        \min\limits_{\alpha, \beta}\, & \sum\limits_{v\in V}\alpha_v - 1 - \sum\limits_{e \in E} \beta_e y_e \\
-        \mathrm{s.t.}\, & 2 \beta_{e} \leq \alpha_u + \alpha_v \qquad & \forall e = (u,v)\in E \\
-        & \alpha, \beta \in \{0,1\}
+\min\limits_{\alpha, \beta}\, & \sum\limits_{v\in V}\alpha_v - 1 - \sum\limits_{e \in E} \beta_e (y_e + z_{es}) \\
+\mathrm{s.t.}\, & 2 \beta_{e} \leq \alpha_u + \alpha_v \qquad & \forall e = (u,v)\in E \\
+& \sum\limits_{v\in V} \alpha_v \geq 1\\
+& \alpha, \beta \in \{0,1\}
 \end{array}
 ```
 """
@@ -364,8 +359,7 @@ This function must have three outputs in this order
 ")
 
 # ╔═╡ d9441eda-d807-4452-af10-11804bc668da
-function MILP_separation_pb(graph, weights; MILP_solver, tol=1e-5)
-	# TODO
+function MILP_separation_pb(graph, weights; MILP_solver=GLPK.Optimizer, tol=1e-5)
 	return false, falses(ne(graph)), 0
 end
 
@@ -421,7 +415,6 @@ This function must have three outputs in this order
 
 # ╔═╡ 7c1b96bc-b493-4b47-baef-22c6629b8286
 function cut_separation_pb(graph, weights; MILP_solver=GLPK.Optimizer, tol=1e-5)
-	# TODO
     return false, falses(ne(graph)), 0
 end
 
@@ -475,9 +468,7 @@ function cut_generation(
 
     call_back_counter = 0
 
-	current_s = 0
     function my_callback_function(cb_data)
-        call_back_counter += 1
         # TODO
     end
 
@@ -504,7 +495,7 @@ plot_forest(yy .|| zz[:, 1], small_instance; grid=true, n=3, m=3)
 
 # ╔═╡ 0b861384-0c87-47f0-866f-b9dc616285a2
 # vv_, yy_, zz_ = cut_generation(
-	# small_instance; separate_constraint_function=MILP_separation_pb, # MILP_solver=GLPK.Optimizer
+	# instance; separate_constraint_function=MILP_separation_pb,  MILP_solver=GLPK.Optimizer
 # )
 
 # ╔═╡ 85fd6b13-421a-4834-b227-55bba9f12f24
@@ -621,16 +612,14 @@ end
 columns
 
 # ╔═╡ 9e23f72a-0220-49d0-8f17-948cce8addbb
-column_value, column_y, column_z = column_heuristic(instance, columns[1:min(length(columns), 50)])
+column_value, column_y, column_z =
+	column_heuristic(instance, columns[1:min(length(columns), 50)])
 
 # ╔═╡ 54aa7e04-897d-42d4-9ff9-62d8992397ec
 scenario_slider
 
 # ╔═╡ 3f94c697-bb57-4414-babe-74860ec0ac60
 plot_forests(column_y, column_z, instance; grid=true)
-
-# ╔═╡ 24636dea-569b-4949-a156-932b75aaab99
-@test column_value >= cut_value
 
 # ╔═╡ 796be5ea-944b-4827-bfe6-654664c35fb3
 md"""# IV - Benders decomposition"""
@@ -686,7 +675,7 @@ When the primal is unfeasible, there is an unbounded ray for the dual, i.e. ``\m
 ```math
 \begin{aligned}
 \max_{\mu, \nu}\quad & \nu_s + \sum_{e\in E} \mu_{es} y_e \\
-\text{s.t.}\quad & -\nu_s - \sum_{e\in T}\mu_{es} \geq 0\\
+\text{s.t.}\quad & -\nu_s - \sum_{e\in T}\mu_{es} \geq 0 & \forall T\in\mathcal{T}\\
 & 0 \leq \mu_{es} \leq 1 & \forall e\in E\\
 & \nu_s\leq 1
 \end{aligned}
@@ -703,6 +692,9 @@ Let us denote ``\mathcal{F}`` the feasibility cuts and ``\mathcal{O}_s`` the opt
 \end{aligned}
 ```
 """
+
+# ╔═╡ 4bd8e5a0-f5a9-49a1-8ee2-32a1a225855d
+TODO("Implement the benders decomposition described above")
 
 # ╔═╡ 74fc70cc-42e7-4e20-9c04-cebe2dcbd3f3
 md"# V - Lagrangian Relaxation"
@@ -869,7 +861,7 @@ md"""### 4. Main algorithm"""
 # ╔═╡ a6186708-a499-43bc-89e2-99a4abd0b700
 TODO(md"Implement the full lagrangian relaxation using all the functions defined above.
 
-The function has 6 outputs as a named tuple:
+The function has 5 outputs as a named tuple:
 - `lb`: final lower bound
 - `ub`: final upper bound
 - `forest`: final forest solution
@@ -3050,7 +3042,6 @@ version = "3.5.0+0"
 # ╠═b0155649-8f26-47ac-9d80-95a979f716cb
 # ╠═c111dadd-3cb6-4cb0-b082-b67e11248e1c
 # ╠═8bc212ec-5a5d-401d-97d0-b2e0eb2b3b6f
-# ╠═cb35c856-6938-41d5-854d-b16af6025184
 # ╟─76cbf0da-7437-464a-ba1b-e093cabd3b83
 # ╟─bfcf2678-bc62-49a5-8856-a08c6a3a2f34
 # ╟─a0cff617-ebe6-4fce-8f1f-a54200c18a39
@@ -3093,10 +3084,10 @@ version = "3.5.0+0"
 # ╠═9e23f72a-0220-49d0-8f17-948cce8addbb
 # ╟─54aa7e04-897d-42d4-9ff9-62d8992397ec
 # ╠═3f94c697-bb57-4414-babe-74860ec0ac60
-# ╠═24636dea-569b-4949-a156-932b75aaab99
 # ╟─796be5ea-944b-4827-bfe6-654664c35fb3
 # ╟─fba7d164-ff1c-4587-92e7-e7fd0668c0bd
-# ╠═1f77d228-4106-4cc8-a9b3-05855f94660e
+# ╟─1f77d228-4106-4cc8-a9b3-05855f94660e
+# ╟─4bd8e5a0-f5a9-49a1-8ee2-32a1a225855d
 # ╟─74fc70cc-42e7-4e20-9c04-cebe2dcbd3f3
 # ╟─78ec76dd-db39-4ad0-8db5-559839420d96
 # ╟─aee74231-afe1-4793-b12a-89948473b6fb
