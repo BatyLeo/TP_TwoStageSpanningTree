@@ -264,10 +264,13 @@ function random_instance(; n, m, nb_scenarios=1, c_range=1:20, d_range=1:20, see
 end
 
 # ╔═╡ b0155649-8f26-47ac-9d80-95a979f716cb
-small_instance = random_instance(; n=3, m=3, nb_scenarios=1, seed=0)
+easy_instance = random_instance(; n=7, m=7, nb_scenarios=1, seed=0)
+
+# ╔═╡ c541b1a0-553c-4f91-80c9-e995d6b13039
+easy_value = kruskal(easy_instance.graph, min.(easy_instance.first_stage_costs, easy_instance.second_stage_costs[:, 1])).value
 
 # ╔═╡ c111dadd-3cb6-4cb0-b082-b67e11248e1c
-S = 50
+S = 20
 
 # ╔═╡ 8bc212ec-5a5d-401d-97d0-b2e0eb2b3b6f
 instance = random_instance(; n, m, nb_scenarios=S, seed=0)
@@ -279,6 +282,7 @@ instance = random_instance(; n, m, nb_scenarios=S, seed=0)
 end
 
 # ╔═╡ d646e96c-5b2c-4349-bf11-133494af1453
+# check if given input is a spanning tree
 function is_spanning_tree(tree_candidate::BitVector, graph::AbstractGraph)
     edge_list = [e for (i, e) in enumerate(edges(graph)) if tree_candidate[i]]
     subgraph = induced_subgraph(graph, edge_list)[1]
@@ -286,6 +290,7 @@ function is_spanning_tree(tree_candidate::BitVector, graph::AbstractGraph)
 end
 
 # ╔═╡ 9d2b37d1-8a73-4b3e-853a-d849b7895d01
+# Check if given input solution is feasible for instance
 function is_feasible(solution::Solution, instance::Instance; verbose=true)
     (; y, z) = solution
     (; graph) = instance
@@ -309,6 +314,7 @@ function is_feasible(solution::Solution, instance::Instance; verbose=true)
 end
 
 # ╔═╡ 53a4d6de-b798-4773-830f-a26d56241b1e
+# Retrieve a full solution from given first stage forest solution
 function solution_from_first_stage_forest(forest::BitVector, instance::Instance)
 	(; graph, second_stage_costs) = instance
 
@@ -330,6 +336,7 @@ function solution_from_first_stage_forest(forest::BitVector, instance::Instance)
 end
 
 # ╔═╡ f81105f1-a70e-406c-ad7e-0390910e4c17
+# Compute the objective value of solution for instance
 function solution_value(solution::Solution, instance::Instance)
     return dot(solution.y, instance.first_stage_costs) + dot(solution.z, instance.second_stage_costs) / nb_scenarios(instance)
 end
@@ -340,7 +347,7 @@ md"""### Visualization tools"""
 # ╔═╡ 6186efdf-227e-4e95-b788-5dd3219162e7
 begin
 	scenario_slider = @bind current_scenario PlutoUI.Slider(1:S; default=1, show_value=true);
-end
+end;
 
 # ╔═╡ 71ad5432-3c86-43da-b097-c668388b836b
 function plot_scenario(
@@ -383,7 +390,7 @@ md"# II - Branch-and-cut"
 md"""
 The MIP formulation of the minimum weight two-stage spanning tree problem having an exponential number of constraints, we cannot solve it directly using a MIP solver, but we can solve it with a subset of constraints and iteratively add the most violated one, up until all constraint are satisfied.
 
-Finding the most violated constraint (for scenario $s$) is called the **separation problem**, and can be formulated as:
+Finding the most violated constraint (for a given scenario $s$) is called the **separation problem**, and can be formulated as:
 
 ```math
 \begin{aligned}
@@ -422,7 +429,25 @@ This function must have three outputs in this order
 - The number of **vertices** in ``Y``.
 ")
 
+# ╔═╡ 8c6610f7-5581-42c3-9792-d7c604e58b2c
+hint(md"""
+- `found` = ``\sum\limits_{v\in V}\alpha_v^\star - 1 - \sum\limits_{e \in E} \beta_e^\star (y_e + z_{es}) < 0``
+- Second output is ``\beta^\star`` binary value
+- ``|Y| = \sum\limits_{v\in V} \alpha_v^\star``
+""")
+
 # ╔═╡ d9441eda-d807-4452-af10-11804bc668da
+"""
+	MILP_separation_problem(graph, weights; MILP_solver, tol=1e-6)
+
+# Arguments
+- `graph`: graph instance of the separation problem
+- `weights`: vector indexed by edge indices, weights[e] = ``y_e + z_{es}``
+
+# Keyword arguments
+- `MILP_solver`: MIP solver to use
+- `tol`: tolerance to avoid numerical issues
+"""
 function MILP_separation_problem(graph, weights; MILP_solver, tol=1e-6)
 	V = nv(graph)
 	E = ne(graph)
@@ -430,7 +455,7 @@ function MILP_separation_problem(graph, weights; MILP_solver, tol=1e-6)
 	model = Model(MILP_solver)
 	set_silent(model)
 	missing
-end;
+end
 
 # ╔═╡ 3eaae7fd-8fff-43b7-9945-cdbde3b6c0fe
 md"## 3. Better MILP formulation"
@@ -473,6 +498,52 @@ The separation problem is equivalent to finding a non-empty minimum-capacity ``s
 ```
 """
 
+# ╔═╡ 1cb00839-476b-453b-bad8-2a65b159819b
+md"The digraph ``\mathcal{D}`` can be built using the following function:"
+
+# ╔═╡ 93e86d7a-6045-4f9b-b81a-4c397663fbcb
+"""
+	build_flow_graph(graph, weights; infinity=1e6)
+
+Build the underlying flow graph from initial graph and weights ``y_e + z_{es}``
+
+# Outputs
+Three vectors indexed by arc indices `a` of the digraph
+- `sources`: sources[a] = source vertex index of arc `a`
+- `destinations`: destinations[a] = destination vertex of arc `a`
+- `costs`: costs[a] = capacity of arc `a`
+"""
+function build_flow_graph(graph, weights; infinity=1e6)
+	V = nv(graph)
+	E = ne(graph)
+
+	# A = 3 * E + V
+	VV = 2 + E + V
+
+	o = 1
+	d = 2
+
+	sources = vcat(
+		fill(o, E),
+		[2 + e for e in 1:E],
+		[2 + e for e in 1:E],
+		[2 + E + v for v in 1:V]
+	)
+	destinations = vcat(
+		[2 + e for e in 1:E],
+		[2 + E + src(e) for e in edges(graph)],
+		[2 + E + dst(e) for e in edges(graph)],
+		fill(d, V)
+	)
+	costs = vcat(
+		[weights[e] for e in 1:E],
+		fill(infinity, 2 * E),
+		ones(V)
+	)
+
+	return sources, destinations, costs
+end;
+
 # ╔═╡ 9f0431b8-7f5e-4081-bb09-c8c3014e035b
 TODO(md"Implement this better formulation in the `cut_separation_pb` function.
 
@@ -481,15 +552,6 @@ This function must have three outputs in this order
 - A BitVector representing the edges in set ``Y`` (`Y[e] == 1` if ``e \in E(Y)``)
 - The number of vertices in ``Y``.
 ")
-
-# ╔═╡ 93e86d7a-6045-4f9b-b81a-4c397663fbcb
-function build_flow_graph(graph, weights; infinity=1e6)
-	V = nv(graph)
-	E = ne(graph)
-
-	missing
-	return sources, destinations, costs
-end
 
 # ╔═╡ 7c1b96bc-b493-4b47-baef-22c6629b8286
 function cut_separation_problem(graph, weights; MILP_solver=GLPK.Optimizer, tol=1e-6)
@@ -532,21 +594,19 @@ md"""## 4. Testing"""
 # ╔═╡ 0a6fc7ae-acb4-48ef-93ac-02f9ada0fcae
 md"Now, we can apply the branch-and-cut on a small instance. However, it will struggle on larger ones because it's quite slow."
 
-# ╔═╡ a01ba16a-1aa7-4bcf-8335-ba67815bfe87
+# ╔═╡ c2ad1f7e-2f4a-46a3-9cbf-852d8a414af2
 cut_solution = cut_generation(
-	small_instance; separation_problem=MILP_separation_problem
+	instance; separation_problem=MILP_separation_problem,
 )
 
-# ╔═╡ 1528b9b3-2857-41db-8bfa-a4a38e7f71e0
-plot_scenario(cut_solution, small_instance, 1)
-
-# ╔═╡ c2ad1f7e-2f4a-46a3-9cbf-852d8a414af2
-# cut_sol = cut_generation(
-# 	instance; separation_problem=MILP_separation_problem,
-# )
+# ╔═╡ fdd03643-63d4-4836-8f34-3259f7574fec
+solution_value(cut_solution, instance)
 
 # ╔═╡ 85fd6b13-421a-4834-b227-55bba9f12f24
-#scenario_slider
+scenario_slider
+
+# ╔═╡ 79196107-93ac-4eb9-bdf3-87b38cedda38
+plot_scenario(cut_solution, instance)
 
 # ╔═╡ 2c2b132c-6b66-4d7b-ad43-a812e0d69573
 md"""The min-cut formulation being faster, we can apply to a larger instance:"""
@@ -556,24 +616,32 @@ cut_solution_2 = cut_generation(
 	instance; separation_problem=cut_separation_problem,
 )
 
+# ╔═╡ 0709ba9a-de5a-4e33-88f1-c10a49bfc065
+solution_value(cut_solution_2, instance)
+
 # ╔═╡ 5b4cda6b-67e9-4c8a-8e7e-c6dd791f8726
 scenario_slider
 
 # ╔═╡ 93d718df-351e-4111-99b5-b7ddaf657955
 plot_scenario(cut_solution_2, instance)
 
-# ╔═╡ 0709ba9a-de5a-4e33-88f1-c10a49bfc065
-solution_value(cut_solution_2, instance)
-
-# ╔═╡ 7198a8f1-0d37-430a-8c55-d69b3e137cca
-is_feasible(cut_solution_2, instance)
+# ╔═╡ 96bb6208-c718-48e1-80d2-0e3f9fcc1127
+@testset ExerciseScore begin
+	@test is_feasible(cut_solution, instance)
+	@test is_feasible(cut_solution_2, instance)
+	@test solution_value(cut_solution, instance) == solution_value(cut_solution_2, instance)
+	easy_sol = cut_generation(
+		easy_instance; separation_problem=cut_separation_problem,
+	)
+	@test solution_value(easy_sol, easy_instance) == easy_value
+end
 
 # ╔═╡ c10b27d7-c222-47fb-bbb2-3e55cc030e50
 md"# III - Column generation"
 
 # ╔═╡ 27cf7e8b-3b5e-4401-a246-3a8949829764
 md"""
-Since minimum spanning tree can be solved efficiently, it is natural to perform and Dantzig-Wolfe reformulation of the problem previously introduced.
+Since minimum spanning tree can be solved efficiently, it is natural to perform a Dantzig-Wolfe reformulation of the problem previously introduced.
 
 It leads to the following formulation.
 
@@ -591,7 +659,7 @@ The linear relaxation of this problem can be solved by column generation, and th
 
 # ╔═╡ 0800e2f6-4085-42dc-982c-e2b833b4171a
 md"""
-The column generation can be implemented as a cut generation in the dual:
+The column generation can be easily implemented as a cut generation in the dual:
 
 ```math
 \begin{aligned}
@@ -614,13 +682,8 @@ The function should have four outputs in this order:
 - Vector of all columns added during callbacks
 ")
 
-# ╔═╡ d3d684c2-28e7-4aa7-b45e-0ccc3247e5d4
-function column_generation(instance; MILP_solver=GLPK.Optimizer, tol=1e-6, verbose=true)
-	missing
-end
-
-# ╔═╡ 6d832dba-3f72-4782-919f-e1c1a0a92d3b
-(; ν, μ, columns) = column_generation(instance)
+# ╔═╡ 6ee5026a-387b-4b30-acb7-303cb9da8724
+warning_box(md"In order for a callback to be called, the underlying optimization model needs to contain integer variables. In the case of the column generation, all variables are continuous, therefore you need to artificially add a dummy integer variable to the model: `@variable(model, dummy, Bin)`")
 
 # ╔═╡ 5f815086-5bf4-4a4c-84c2-94f2344cd6dd
 md"From this solution of the linear relaxation, we can reconstruct an integer heuristic solution by solving the column formulation and restricting the number of columns."
@@ -673,6 +736,12 @@ is_feasible(column_solution, instance)
 # ╔═╡ 6a3f4ea6-e780-49c3-b1a9-437aefc404be
 solution_value(column_solution, instance)
 
+# ╔═╡ 2ba1d475-e39b-4bee-8597-c468677a976d
+@testset ExerciseScore begin
+	@test is_feasible(column_solution, instance)
+	@test solution_value(column_solution, instance) >= solution_value(cut_solution, instance)
+end
+
 # ╔═╡ 796be5ea-944b-4827-bfe6-654664c35fb3
 md"""# IV - Benders decomposition"""
 
@@ -681,7 +750,7 @@ md"The integer optimal solution of the column generation formulation can be foun
 
 # ╔═╡ 1f77d228-4106-4cc8-a9b3-05855f94660e
 md"""
-When first stage variables ``y`` are fixed, the subproblem for scenario ``s``becomes:
+When first stage variables ``y`` are fixed, the subproblem for scenario ``s`` becomes:
 
 ```math
 \begin{aligned}
@@ -772,11 +841,13 @@ scenario_slider
 # ╔═╡ 404b7809-6718-424f-8aec-a8b2c35701eb
 plot_scenario(benders_solution, instance)
 
-# ╔═╡ bab8cb56-bf9a-4a72-a3f9-98bba93a18ef
-is_feasible(benders_solution, instance)
-
-# ╔═╡ 9a0d2a0d-1e07-4f9f-ab5d-2b8dcb522163
-solution_value(benders_solution, instance)
+# ╔═╡ 17d6b9cf-1557-4b13-82cd-e642219ba8ac
+@testset ExerciseScore begin
+	@test is_feasible(benders_solution, instance)
+	@test solution_value(benders_solution, instance) == solution_value(cut_solution, instance)
+	easy_sol = benders_decomposition(easy_instance; verbose=false)
+	@test solution_value(easy_sol, easy_instance) == easy_value
+end
 
 # ╔═╡ 74fc70cc-42e7-4e20-9c04-cebe2dcbd3f3
 md"# V - Lagrangian Relaxation"
@@ -921,8 +992,19 @@ md"""### 4. Main algorithm"""
 # ╔═╡ a6186708-a499-43bc-89e2-99a4abd0b700
 TODO(md"Implement the full lagrangian relaxation using all the functions defined above.")
 
+# ╔═╡ d07d3192-32bd-4f8d-8775-23429e888eb6
+function lagrangian_relaxation(
+    inst::Instance; nb_epochs=100, stop_gap=1e-8
+)
+	missing
+    return solution, (; lb, ub, best_theta, lb_history, ub_history)
+end
+
 # ╔═╡ e6f62957-7cba-48a1-bfd3-52e796c71fed
 md"""### 5. Testing"""
+
+# ╔═╡ 5529ac14-1171-4e77-b3b4-dbcde4b704a4
+lagrangian_solution, (; lb, ub, ub_history, lb_history) = lagrangian_relaxation(instance; nb_epochs=25_000)
 
 # ╔═╡ a75f1918-a7e3-4041-a4bf-b64fb7094546
 begin
@@ -944,16 +1026,22 @@ is_feasible(lagrangian_solution, instance)
 # ╔═╡ ac1f93b7-57f0-41ed-b159-800863c6a530
 solution_value(lagrangian_solution, instance)
 
-# ╔═╡ d07d3192-32bd-4f8d-8775-23429e888eb6
-function lagrangian_relaxation(
-    inst::Instance; nb_epochs=100, stop_gap=1e-8
-)
-	missing
-    return solution, (; lb, ub, best_theta, lb_history, ub_history)
+# ╔═╡ c6ea482d-431b-41c8-8478-3b795c59c18f
+@testset ExerciseScore begin
+	@test is_feasible(lagrangian_solution, instance)
+	@test solution_value(lagrangian_solution, instance) >= solution_value(cut_solution, instance)
+	@test lb <= ub
 end
 
-# ╔═╡ 5529ac14-1171-4e77-b3b4-dbcde4b704a4
-lagrangian_solution, (; lb, ub, ub_history, lb_history) = lagrangian_relaxation(instance; nb_epochs=25_000)
+# ╔═╡ 6d832dba-3f72-4782-919f-e1c1a0a92d3b
+(; ν, μ, columns) = column_generation(instance)
+
+# ╔═╡ d3d684c2-28e7-4aa7-b45e-0ccc3247e5d4
+function column_generation(
+	instance; MILP_solver=GLPK.Optimizer, tol=1e-6, verbose=true
+)
+	missing
+end;
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
@@ -2778,6 +2866,7 @@ version = "1.4.1+1"
 # ╠═e14e5513-5cc2-4b70-ab29-8ee53ca166cc
 # ╠═c34c3f25-58ea-4219-b856-2ed9d790d291
 # ╠═b0155649-8f26-47ac-9d80-95a979f716cb
+# ╠═c541b1a0-553c-4f91-80c9-e995d6b13039
 # ╠═c111dadd-3cb6-4cb0-b082-b67e11248e1c
 # ╠═8bc212ec-5a5d-401d-97d0-b2e0eb2b3b6f
 # ╠═8c00c839-b349-42e1-8e3f-afbd74fcf8c2
@@ -2794,11 +2883,13 @@ version = "1.4.1+1"
 # ╟─b104ec32-2b7a-42f2-99ee-6dee7c0c9cad
 # ╟─02f6f906-c744-4e16-b73e-2dc098d6d7e3
 # ╟─16c03d54-720e-493b-bde6-34d4da9941ab
+# ╟─8c6610f7-5581-42c3-9792-d7c604e58b2c
 # ╠═d9441eda-d807-4452-af10-11804bc668da
 # ╟─3eaae7fd-8fff-43b7-9945-cdbde3b6c0fe
 # ╟─7f8dea10-942e-4bae-9223-387650e35cc9
-# ╟─9f0431b8-7f5e-4081-bb09-c8c3014e035b
+# ╟─1cb00839-476b-453b-bad8-2a65b159819b
 # ╠═93e86d7a-6045-4f9b-b81a-4c397663fbcb
+# ╟─9f0431b8-7f5e-4081-bb09-c8c3014e035b
 # ╠═7c1b96bc-b493-4b47-baef-22c6629b8286
 # ╟─60f15817-f696-4fa4-a69d-46c00f2513c7
 # ╟─ec711cc2-1613-42d7-bdae-01460509da24
@@ -2806,20 +2897,21 @@ version = "1.4.1+1"
 # ╠═154b4c51-c471-490e-8265-230f3eda92e4
 # ╟─a129d5aa-1d45-407a-aeb2-00845330a0cb
 # ╟─0a6fc7ae-acb4-48ef-93ac-02f9ada0fcae
-# ╠═a01ba16a-1aa7-4bcf-8335-ba67815bfe87
-# ╠═1528b9b3-2857-41db-8bfa-a4a38e7f71e0
 # ╠═c2ad1f7e-2f4a-46a3-9cbf-852d8a414af2
-# ╠═85fd6b13-421a-4834-b227-55bba9f12f24
+# ╠═fdd03643-63d4-4836-8f34-3259f7574fec
+# ╟─85fd6b13-421a-4834-b227-55bba9f12f24
+# ╠═79196107-93ac-4eb9-bdf3-87b38cedda38
 # ╟─2c2b132c-6b66-4d7b-ad43-a812e0d69573
 # ╠═104d1d6a-e6ed-4511-b08a-a72315959390
+# ╠═0709ba9a-de5a-4e33-88f1-c10a49bfc065
 # ╟─5b4cda6b-67e9-4c8a-8e7e-c6dd791f8726
 # ╠═93d718df-351e-4111-99b5-b7ddaf657955
-# ╠═0709ba9a-de5a-4e33-88f1-c10a49bfc065
-# ╠═7198a8f1-0d37-430a-8c55-d69b3e137cca
+# ╠═96bb6208-c718-48e1-80d2-0e3f9fcc1127
 # ╟─c10b27d7-c222-47fb-bbb2-3e55cc030e50
 # ╟─27cf7e8b-3b5e-4401-a246-3a8949829764
 # ╟─0800e2f6-4085-42dc-982c-e2b833b4171a
 # ╟─8a2baef9-9ab3-4702-a3c2-af8300c83f7d
+# ╟─6ee5026a-387b-4b30-acb7-303cb9da8724
 # ╠═d3d684c2-28e7-4aa7-b45e-0ccc3247e5d4
 # ╠═6d832dba-3f72-4782-919f-e1c1a0a92d3b
 # ╟─5f815086-5bf4-4a4c-84c2-94f2344cd6dd
@@ -2830,6 +2922,7 @@ version = "1.4.1+1"
 # ╠═3f94c697-bb57-4414-babe-74860ec0ac60
 # ╠═4dcf3e69-0e4f-487f-ae24-b0fac8353908
 # ╠═6a3f4ea6-e780-49c3-b1a9-437aefc404be
+# ╠═2ba1d475-e39b-4bee-8597-c468677a976d
 # ╟─796be5ea-944b-4827-bfe6-654664c35fb3
 # ╟─fba7d164-ff1c-4587-92e7-e7fd0668c0bd
 # ╟─1f77d228-4106-4cc8-a9b3-05855f94660e
@@ -2839,8 +2932,7 @@ version = "1.4.1+1"
 # ╠═fd3a09c5-6b02-4382-9eaf-fa81e4589057
 # ╟─4c928cc0-71dc-4bd3-9486-0b1bfb7220d5
 # ╠═404b7809-6718-424f-8aec-a8b2c35701eb
-# ╠═bab8cb56-bf9a-4a72-a3f9-98bba93a18ef
-# ╠═9a0d2a0d-1e07-4f9f-ab5d-2b8dcb522163
+# ╠═17d6b9cf-1557-4b13-82cd-e642219ba8ac
 # ╟─74fc70cc-42e7-4e20-9c04-cebe2dcbd3f3
 # ╟─78ec76dd-db39-4ad0-8db5-559839420d96
 # ╟─aee74231-afe1-4793-b12a-89948473b6fb
@@ -2861,5 +2953,6 @@ version = "1.4.1+1"
 # ╠═5b4f8555-a6dc-4869-afe6-91820f76155d
 # ╠═b6c76c74-6931-4bf5-a126-ae2ac3f19607
 # ╠═ac1f93b7-57f0-41ed-b159-800863c6a530
+# ╠═c6ea482d-431b-41c8-8478-3b795c59c18f
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
